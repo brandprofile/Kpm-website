@@ -24,7 +24,7 @@ $raw = file_get_contents('php://input', false, null, 0, 8192);
 $d = json_decode($raw ?: '{}', true);
 if (!is_array($d)) { http_response_code(400); exit; }
 
-$labels = ['quote_form' => 'Quote form', 'entry_popup' => 'Call-back pop-up', 'routebar' => 'Route search', 'pricing_form' => 'Price check',
+$labels = ['quote_form' => 'Quote form', 'home_quick_form' => 'Home quick form', 'entry_popup' => 'Call-back pop-up', 'routebar' => 'Route search', 'pricing_form' => 'Price check',
   'track_form' => 'Track my car', 'whatsapp_click' => 'WhatsApp button click', 'call_click' => 'Call button click'];
 $g = function ($k) use ($d) { $v = $d[$k] ?? ''; return is_scalar($v) ? trim((string)$v) : ''; };
 $type = $g('lead_type') ?: $g('form_name');
