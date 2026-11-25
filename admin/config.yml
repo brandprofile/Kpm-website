@@ -1,0 +1,74 @@
+# KPM Content Manager (Decap CMS). Opens at https://<your-domain>/admin/
+# Needs the site in a GitHub repo + Netlify (Identity/Git Gateway) or Cloudflare/Decap GitHub OAuth.
+backend:
+  name: git-gateway
+  branch: main
+media_folder: public/images
+public_folder: /images
+collections:
+  - name: seo
+    label: SEO
+    files:
+      - name: overrides
+        label: Page SEO overrides (any page)
+        file: src/data/seo-overrides.json
+        fields:
+          - name: pages
+            label: Pages
+            label_singular: Page
+            widget: list
+            summary: "{{fields.path}}"
+            fields:
+              - { name: path, label: "Page path (e.g. /car-transport-in-kochi/)", widget: string }
+              - { name: title, label: "SEO title (50-60 chars)", widget: string, required: false }
+              - { name: description, label: "Meta description (140-160 chars)", widget: text, required: false }
+              - { name: h1, label: "H1 heading", widget: string, required: false }
+              - { name: intro, label: "Intro paragraph", widget: text, required: false }
+              - { name: keywords, label: "Keywords", widget: string, required: false }
+              - { name: ogImage, label: "Social share image", widget: image, required: false }
+              - { name: noindex, label: "Hide from Google (noindex)", widget: boolean, default: false, required: false }
+      - name: templates
+        label: SEO templates for all location pages
+        file: src/data/seo-settings.json
+        fields:
+          - { name: defaultTitle, label: Default title, widget: string }
+          - { name: defaultDescription, label: Default description, widget: text }
+          - name: city
+            label: "City pages (tokens: {city} {state})"
+            widget: object
+            fields: [{ name: title, widget: string }, { name: description, widget: text }, { name: h1, widget: string }]
+          - name: state
+            label: "State pages (tokens: {state})"
+            widget: object
+            fields: [{ name: title, widget: string }, { name: description, widget: text }, { name: h1, widget: string }]
+          - name: route
+            label: "Route pages (tokens: {from} {to} {km} {days} {price})"
+            widget: object
+            fields: [{ name: title, widget: string }, { name: description, widget: text }, { name: h1, widget: string }]
+  - name: content
+    label: Content
+    files:
+      - name: faqs
+        label: FAQs
+        file: src/data/faqs.json
+        fields:
+          - name: faqs
+            widget: list
+            summary: "{{fields.q}}"
+            fields: [{ name: q, label: Question, widget: string }, { name: a, label: Answer, widget: text }]
+      - name: videos
+        label: Video testimonials
+        file: src/data/testimonials.json
+        fields:
+          - name: videos
+            widget: list
+            summary: "{{fields.name}} - {{fields.route}}"
+            fields:
+              - { name: name, widget: string }
+              - { name: route, label: "Route (e.g. Kochi to Bengaluru)", widget: string }
+              - { name: car, widget: string }
+              - { name: rating, widget: number, default: 5, min: 1, max: 5 }
+              - { name: quote, widget: text }
+              - { name: youtube, label: "YouTube video ID (recommended)", widget: string, required: false }
+              - { name: video, label: "Or MP4 file", widget: file, required: false, media_folder: /public/videos, public_folder: /videos }
+              - { name: poster, label: "Thumbnail", widget: image, required: false, media_folder: /public/images/testimonials, public_folder: /images/testimonials }
