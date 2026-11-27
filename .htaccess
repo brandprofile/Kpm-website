@@ -24,13 +24,13 @@ ErrorDocument 404 /404.html
 
   # 4. Block common attack probes on a static site (no PHP or WordPress here)
   RewriteRule ^(wp-admin|wp-login\.php|wp-content|xmlrpc\.php|phpmyadmin|cgi-bin)(/|$) - [F,L,NC]
-  RewriteCond %{REQUEST_URI} !^/lead\.php$
+  RewriteCond %{REQUEST_URI} !^/(lead|visit)\.php$
   RewriteRule \.php$ - [F,L,NC]
 
   # 5. Only allow normal page methods
-  # (the lead logger /lead.php also accepts POST)
+  # (the lead logger /lead.php and ad-visit logger /visit.php also accept POST)
   RewriteCond %{REQUEST_METHOD} !^(GET|HEAD|OPTIONS)$
-  RewriteCond %{REQUEST_URI} !^/lead\.php$
+  RewriteCond %{REQUEST_URI} !^/(lead|visit)\.php$
   RewriteRule ^ - [F,L]
 </IfModule>
 
