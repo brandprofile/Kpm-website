@@ -52,6 +52,21 @@ function ip() { return $_SERVER['REMOTE_ADDR'] ?? '0'; }
 $self = '/kpm-admin.php';
 $msg = '';
 
+// ---------- newest lead for the phone notification (service worker, owner cookie required) ----------
+function newest_lead() {
+  global $DIR; $fh = @fopen("$DIR/leads.csv", 'r'); if (!$fh) return null; $last = null;
+  while (($line = fgets($fh)) !== false) { $r = str_getcsv($line); if (count($r) >= 7 && stripos($r[1], 'click') === false) $last = $r; }
+  fclose($fh); return $last;
+}
+if (isset($_GET['latest'])) {
+  header('Content-Type: application/json');
+  if (!logged_in()) { http_response_code(401); exit('{"error":"login"}'); }
+  $test = jread('push-test.json', []);
+  if (($test['t'] ?? 0) > time() - 120) { jwrite('push-test.json', []); exit('{"test":true}'); }
+  $r = newest_lead();
+  exit(json_encode(['lead' => $r ? ['time' => substr($r[0], 12, 5), 'type' => trim($r[1]), 'name' => trim($r[3]), 'phone' => trim($r[4]), 'from' => $r[5], 'to' => $r[6], 'car' => $r[7]] : null], JSON_UNESCAPED_UNICODE));
+}
+
 // ---------- POST actions ----------
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   $origin = $_SERVER['HTTP_ORIGIN'] ?? '';
@@ -74,6 +89,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
   } elseif (logged_in() && hash_equals(csrf(), (string)($_POST['t'] ?? ''))) {
     $back = $self . '?' . http_build_query(array_intersect_key($_GET, ['tab' => 1, 'd' => 1, 'all' => 1]));
+    if ($a === 'push_sub' || $a === 'push_test') {
+      header('Content-Type: application/json');
+      require_once __DIR__ . '/kpm-push-lib.php';
+      if ($a === 'push_sub') {
+        $sub = json_decode((string)($_POST['sub'] ?? ''), true);
+        $ep = is_array($sub) ? (string)($sub['endpoint'] ?? '') : '';
+        if (!preg_match('#^https://[a-z0-9.-]+/#i', $ep) || strlen($ep) > 600) exit('{"ok":false}');
+        $subs = array_values(array_filter(jread('push-subs.json', []), function ($x) use ($ep) { return ($x['endpoint'] ?? '') !== $ep; }));
+        $subs[] = ['endpoint' => $ep, 'added' => date('c'), 'ua' => clean($_SERVER['HTTP_USER_AGENT'] ?? '', 120)];
+        jwrite('push-subs.json', array_slice($subs, -10));
+        exit(json_encode(['ok' => true, 'phones' => count($subs)]));
+      }
+      jwrite('push-test.json', ['t' => time()]);
+      [$ok, $bad] = kpm_push_all();
+      exit(json_encode(['ok' => $ok > 0, 'sent' => $ok, 'failed' => $bad]));
+    }
     if ($a === 'logout') { set_cookie('', time() - 3600); header("Location: $self"); exit; }
     if ($a === 'convert' || $a === 'addmove') {
       $moves = jread('moves.json', []);
@@ -104,7 +135,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
       elseif (strlen($new) < 10) $msg = 'New password must be at least 10 characters.';
       else { $cfg['pass_hash'] = password_hash($new, PASSWORD_DEFAULT); jwrite('admin.json', $cfg); set_cookie('', time() - 3600); header("Location: $self?changed=1"); exit; }
     }
-  } else { $msg = 'Session expired. Please log in again.'; }
+  } else {
+    if (in_array($a, ['push_sub', 'push_test'], true)) { header('Content-Type: application/json'); http_response_code(401); exit('{"ok":false,"error":"login"}'); }
+    $msg = 'Session expired. Please log in again.';
+  }
 }
 
 // ---------- page ----------
@@ -116,6 +150,7 @@ $q = function ($extra) use ($tab, $days, $all) { return '?' . http_build_query(a
 ?><!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow">
 <title>KPM Owner Login</title>
+<link rel="manifest" href="/kpm-admin.webmanifest"><meta name="theme-color" content="#0e1a2e"><link rel="icon" href="/kpm-admin-192.png"><link rel="apple-touch-icon" href="/kpm-admin-192.png">
 <style>
 :root{--navy:#0e1a2e;--red:#d42a3c;--bg:#f3f5f9;--card:#fff;--line:#e2e6ee;--mut:#5d6778;--ok:#11823b}
 *{box-sizing:border-box}body{margin:0;font:15px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--navy)}
@@ -139,6 +174,7 @@ input[type=checkbox]{width:auto}
 .msg{background:#fde8ea;color:#8b1424;padding:10px 12px;border-radius:9px;margin-bottom:10px}
 .login{max-width:340px;margin:12vh auto;padding:0 16px}.login .card{padding:20px}
 .empty{color:var(--mut);text-align:center;padding:30px 0}
+[hidden]{display:none!important}
 @media(max-width:520px){.f{grid-template-columns:1fr}}
 </style></head><body>
 <?php if (!$in): ?>
@@ -166,7 +202,12 @@ input[type=checkbox]{width:auto}
   <a href="?tab=settings" class="<?= $tab === 'settings' ? 'on' : '' ?>">Password</a>
 </nav>
 
-<?php if ($tab === 'leads'):
+<?php if ($tab === 'leads'): ?>
+  <div class="card" id="alerts" style="background:#fff8e6;border-color:#f1dca4">
+    <b>🔔 New lead alerts</b><div class="t" id="al-st" style="margin:2px 0 10px">Get a phone notification with sound for every new form lead.</div>
+    <div class="row"><button type="button" id="al-on">Turn on alerts</button><button type="button" class="l" id="al-test" hidden>Send test alert</button></div>
+  </div>
+<?php
   $rows = [];
   $fh = @fopen("$DIR/leads.csv", 'r');
   if ($fh) { while (($line = fgets($fh)) !== false) { $r = str_getcsv($line); if (count($r) < 7) continue; $r['key'] = sha1(rtrim($line, "\r\n")); $rows[] = $r; } fclose($fh); }
@@ -269,5 +310,36 @@ input[type=checkbox]{width:auto}
     <p class="t">Changing it logs out every phone and computer.</p></div>
 <?php endif; ?>
 </div>
+<?php endif; ?>
+<?php if ($in): ?>
+<script>
+(function () {
+  var T = <?= json_encode(csrf()) ?>, KEY = <?= json_encode((function () { require_once __DIR__ . '/kpm-push-lib.php'; $v = kpm_vapid(); return $v ? $v['pub'] : ''; })()) ?>;
+  var st = document.getElementById('al-st'), on = document.getElementById('al-on'), test = document.getElementById('al-test');
+  if (!('serviceWorker' in navigator)) return;
+  navigator.serviceWorker.register('/kpm-sw.js', { scope: '/kpm-admin.php' });
+  if (!st) return;
+  if (!('PushManager' in window) || !KEY) { st.textContent = 'This browser cannot show alerts. Open this page in Chrome on your phone.'; on.hidden = true; return; }
+  var post = function (data) { var f = new FormData(); f.append('t', T); for (var k in data) f.append(k, data[k]); return fetch(location.pathname, { method: 'POST', body: f, credentials: 'same-origin' }).then(function (r) { return r.json(); }); };
+  var u8 = function (b) { b = b.replace(/-/g, '+').replace(/_/g, '/'); var s = atob(b + '==='.slice((b.length + 3) % 4)), a = new Uint8Array(s.length); for (var i = 0; i < s.length; i++) a[i] = s.charCodeAt(i); return a; };
+  var ready = function () { st.textContent = 'Alerts are ON on this phone. Every new form lead will ring.'; on.hidden = true; test.hidden = false; };
+  navigator.serviceWorker.ready.then(function (reg) { return reg.pushManager.getSubscription(); }).then(function (s) { if (s && Notification.permission === 'granted') { post({ a: 'push_sub', sub: JSON.stringify(s) }); ready(); } });
+  on.onclick = function () {
+    on.disabled = true; st.textContent = 'Tap "Allow" when your phone asks…';
+    Notification.requestPermission().then(function (p) {
+      if (p !== 'granted') throw new Error('Notifications are blocked. Allow them in Chrome settings for this site, then try again.');
+      return navigator.serviceWorker.ready;
+    }).then(function (reg) { return reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: u8(KEY) }); })
+      .then(function (s) { return post({ a: 'push_sub', sub: JSON.stringify(s) }); })
+      .then(function (j) { if (!j.ok) throw new Error('Could not save. Please log in again.'); ready(); })
+      .catch(function (e) { st.textContent = e.message || 'Could not turn on alerts.'; on.disabled = false; });
+  };
+  test.onclick = function () {
+    test.disabled = true; st.textContent = 'Sending a test alert…';
+    post({ a: 'push_test' }).then(function (j) { st.textContent = j.ok ? 'Test sent. Your phone should ring in a few seconds.' : 'Test failed. Turn alerts on again.'; if (!j.ok) on.hidden = false; })
+      .catch(function () { st.textContent = 'Test failed.'; }).then(function () { test.disabled = false; });
+  };
+})();
+</script>
 <?php endif; ?>
 </body></html>

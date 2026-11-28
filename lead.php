@@ -42,3 +42,10 @@ $fh = fopen($file, 'a');
 if ($fh && flock($fh, LOCK_EX)) { fputcsv($fh, $row); flock($fh, LOCK_UN); }
 if ($fh) fclose($fh);
 http_response_code(204);
+
+// Phone alert for real form leads (not WhatsApp / call taps): Web Push to the owner's phones, sent after replying.
+if (stripos($row[1], 'click') === false && ($g('Name') !== '' || $g('Phone') !== '') && is_file(__DIR__ . '/kpm-push-lib.php')) {
+  if (function_exists('fastcgi_finish_request')) fastcgi_finish_request();
+  require_once __DIR__ . '/kpm-push-lib.php';
+  kpm_push_all();
+}

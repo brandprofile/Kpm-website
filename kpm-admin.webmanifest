@@ -1,0 +1,13 @@
+{
+  "name": "KPM Owner",
+  "short_name": "KPM Leads",
+  "start_url": "/kpm-admin.php",
+  "scope": "/kpm-admin.php",
+  "display": "standalone",
+  "background_color": "#f3f5f9",
+  "theme_color": "#0e1a2e",
+  "icons": [
+    { "src": "/kpm-admin-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "/kpm-admin-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}
