@@ -12,6 +12,7 @@ const COOKIE = 'kpm_admin';
 const SESSION_DAYS = 30;
 const MAX_FAILS = 5;          // wrong passwords allowed per IP ...
 const LOCK_MINUTES = 15;      // ... within this many minutes
+const ADS_TOKEN_HASH = '8188300d8eb1182bea06cd32d49af1e38140a1d6635d1587ba94639d6f1cd1f4'; // Google Ads Script posts daily spend with this token (only its hash is here)
 
 date_default_timezone_set('Asia/Kolkata');
 header('Cache-Control: no-store, private');
@@ -65,6 +66,8 @@ if (isset($_GET['latest'])) {
   if (!logged_in()) { http_response_code(401); exit('{"error":"login"}'); }
   $test = jread('push-test.json', []);
   if (($test['t'] ?? 0) > time() - 120) { jwrite('push-test.json', []); exit('{"test":true}'); }
+  $n = jread('notice.json', []);   // car-moving reminders queued by kpm-cron.php
+  if (($n['t'] ?? 0) > time() - 300) { jwrite('notice.json', []); exit(json_encode(['notice' => ['title' => $n['title'], 'body' => $n['body']]], JSON_UNESCAPED_UNICODE)); }
   $r = newest_lead();
   exit(json_encode(['lead' => $r ? ['time' => substr($r[0], 12, 5), 'type' => trim($r[1]), 'name' => trim($r[3]), 'phone' => trim($r[4]), 'from' => $r[5], 'to' => $r[6], 'car' => $r[7]] : null], JSON_UNESCAPED_UNICODE));
 }
@@ -75,6 +78,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   if ($origin !== '' && !preg_match('#^https://(www\.)?cartransportation\.co\.in$#', $origin)) { http_response_code(403); exit('Forbidden'); }
   $a = $_POST['a'] ?? '';
 
+  if ($a === 'ads_in') {   // from the Google Ads Script in KPM's ad account (no login cookie, token instead)
+    header('Content-Type: application/json');
+    if (!hash_equals(ADS_TOKEN_HASH, hash('sha256', (string)($_POST['k'] ?? '')))) { http_response_code(403); exit('{"ok":false}'); }
+    $in = json_decode((string)($_POST['rows'] ?? '[]'), true); $ads = jread('ads-daily.json', []); $n = 0;
+    if (is_array($in)) foreach ($in as $r) {
+      $d = okdate($r['date'] ?? ''); if (!$d) continue;
+      $ads[$d] = ['cost' => round((float)($r['cost'] ?? 0), 2), 'clicks' => (int)($r['clicks'] ?? 0), 'impr' => (int)($r['impr'] ?? 0), 'conv' => round((float)($r['conv'] ?? 0), 1), 'calls' => (int)($r['calls'] ?? 0)]; $n++;
+    }
+    ksort($ads); $ads['_updated'] = date('c'); jwrite('ads-daily.json', $ads);
+    exit(json_encode(['ok' => true, 'days' => $n]));
+  }
   if ($a === 'login') {
     $fails = jread('login-fails.json', []);
     $now = time();
@@ -90,7 +104,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
       usleep(700000); $msg = 'Wrong password.';
     }
   } elseif (logged_in() && hash_equals(csrf(), (string)($_POST['t'] ?? ''))) {
-    $back = $self . '?' . http_build_query(array_intersect_key($_GET, ['tab' => 1, 'd' => 1, 'all' => 1]));
+    $back = $self . '?' . http_build_query(array_intersect_key($_GET, ['tab' => 1, 'd' => 1, 'all' => 1, 'from' => 1, 'to' => 1, 'g' => 1]));
     if ($a === 'push_sub' || $a === 'push_test') {
       header('Content-Type: application/json');
       require_once __DIR__ . '/kpm-push-lib.php';
@@ -112,7 +126,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
       $moves = jread('moves.json', []);
       $m = ['id' => bin2hex(random_bytes(6)), 'lead' => preg_replace('/[^a-f0-9]/', '', (string)($_POST['lead'] ?? '')),
         'date' => okdate($_POST['date'] ?? '') ?: date('Y-m-d'), 'from' => clean($_POST['from'] ?? '', 40), 'to' => clean($_POST['to'] ?? '', 40),
-        'car' => clean($_POST['car'] ?? '', 40), 'show' => !empty($_POST['show']), 'added' => date('c')];
+        'car' => clean($_POST['car'] ?? '', 40), 'show' => !empty($_POST['show']), 'added' => date('c'),
+        'name' => clean($_POST['name'] ?? '', 60), 'phone' => preg_replace('/[^0-9+ ]/', '', (string)($_POST['phone'] ?? '')),
+        'price' => max(0, (int)($_POST['price'] ?? 0)), 'advance' => max(0, (int)($_POST['advance'] ?? 0)), 'note' => clean($_POST['note'] ?? '', 120)];
       if ($m['from'] !== '' && $m['to'] !== '') { array_unshift($moves, $m); jwrite('moves.json', $moves); }
       header("Location: $back"); exit;
     }
@@ -121,6 +137,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
       $hid = jread('hidden-leads.json', []);
       if ($a === 'lead_hide' && strlen($k) === 40) $hid[$k] = date('c'); else unset($hid[$k]);
       jwrite('hidden-leads.json', $hid); header("Location: $back"); exit;
+    }
+    if ($a === 'move_pay') {
+      $id = (string)($_POST['id'] ?? ''); $moves = jread('moves.json', []);
+      foreach ($moves as $i => $m) if ($m['id'] === $id) {
+        $moves[$i]['price'] = max(0, (int)($_POST['price'] ?? 0)); $moves[$i]['advance'] = max(0, (int)($_POST['advance'] ?? 0));
+        $moves[$i]['date'] = okdate($_POST['date'] ?? '') ?: $m['date']; $moves[$i]['note'] = clean($_POST['note'] ?? '', 120);
+      }
+      jwrite('moves.json', $moves); header("Location: $back"); exit;
     }
     if ($a === 'move_toggle' || $a === 'move_del') {
       $id = (string)($_POST['id'] ?? ''); $moves = jread('moves.json', []);
@@ -153,10 +177,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 $in = logged_in();
 // Keep the owner logged in: every visit renews the 30 days (and upgrades old cookies to Lax).
 if ($in && $_SERVER['REQUEST_METHOD'] === 'GET') { $exp = time() + SESSION_DAYS * 86400; set_cookie($exp . '.' . sign($exp), $exp); $_COOKIE[COOKIE] = $exp . '.' . sign($exp); }
-$tab = in_array($_GET['tab'] ?? '', ['leads', 'moves', 'offers', 'settings'], true) ? $_GET['tab'] : 'leads';
-$days = in_array($_GET['d'] ?? '', ['1', '7', '30', 'all'], true) ? $_GET['d'] : '7';
+$tab = in_array($_GET['tab'] ?? '', ['leads', 'moves', 'reports', 'offers', 'settings'], true) ? $_GET['tab'] : 'leads';
+$days = in_array($_GET['d'] ?? '', ['1', '7', '30', 'all'], true) ? $_GET['d'] : ($tab === 'reports' ? '30' : '7');
 $all = !empty($_GET['all']);
-$q = function ($extra) use ($tab, $days, $all) { return '?' . http_build_query(array_merge(['tab' => $tab, 'd' => $days, 'all' => $all ? 1 : null], $extra)); };
+$from = okdate($_GET['from'] ?? ''); $to = okdate($_GET['to'] ?? '');
+if ($from || $to) { $days = 'custom'; if (!$from) $from = '2026-11-01'; if (!$to) $to = date('Y-m-d'); if ($to < $from) [$from, $to] = [$to, $from]; }
+$grp = in_array($_GET['g'] ?? '', ['day', 'week', 'month'], true) ? $_GET['g'] : 'day';
+// Selected period as [start timestamp, end timestamp]
+$range = $days === 'custom' ? [strtotime($from), strtotime($to) + 86399] : ($days === 'all' ? [0, PHP_INT_MAX] : [strtotime('today') - ((int)$days - 1) * 86400, PHP_INT_MAX]);
+$q = function ($extra) use ($tab, $days, $all, $from, $to, $grp) {
+  $base = ['tab' => $tab, 'd' => $days === 'custom' ? null : $days, 'all' => $all ? 1 : null, 'from' => $days === 'custom' ? $from : null, 'to' => $days === 'custom' ? $to : null, 'g' => $grp !== 'day' ? $grp : null];
+  if (isset($extra['d'])) { $base['from'] = null; $base['to'] = null; }
+  return '?' . http_build_query(array_merge($base, $extra));
+};
+function inr($n) { $n = (int)round($n); $s = (string)abs($n); if (strlen($s) > 3) { $l = substr($s, -3); $s = substr($s, 0, -3); $s = preg_replace('/\B(?=(\d{2})+(?!\d))/', ',', $s) . ',' . $l; } return ($n < 0 ? '-' : '') . '₹' . $s; }
+function read_leads() {
+  global $DIR; $rows = []; $fh = @fopen("$DIR/leads.csv", 'r');
+  if ($fh) { while (($line = fgets($fh)) !== false) { $r = str_getcsv($line); if (count($r) < 7) continue; $r['key'] = sha1(rtrim($line, "\r\n"));
+    $r['ts'] = strtotime(str_replace('-', ' ', substr($r[0], 0, 11)) . ' ' . substr($r[0], 12)); $r['click'] = stripos($r[1], 'click') !== false;
+    $r['ads'] = ($r[14] ?? '') !== '' || stripos($r[11] ?? '', 'google') !== false; $rows[] = $r; } fclose($fh); }
+  return $rows;
+}
 ?><!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow">
 <title>KPM Owner Login</title>
@@ -185,6 +226,10 @@ input[type=checkbox]{width:auto}
 .login{max-width:340px;margin:12vh auto;padding:0 16px}.login .card{padding:20px}
 .empty{color:var(--mut);text-align:center;padding:30px 0}
 [hidden]{display:none!important}
+.dr input{width:auto;flex:1;min-width:0;padding:6px 8px;font-size:14px}.dr button{padding:6px 12px}
+.kpis{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px;margin-bottom:10px}.kpi{background:#fff;border:1px solid var(--line);border-radius:12px;padding:10px 12px}.kpi b{display:block;font-size:20px}.kpi span{font-size:12px;color:var(--mut)}
+.tw{overflow-x:auto;background:#fff;border:1px solid var(--line);border-radius:12px}table.rp{border-collapse:collapse;width:100%;font-size:13px;white-space:nowrap}.rp th,.rp td{padding:8px 10px;text-align:right;border-bottom:1px solid var(--line)}.rp th:first-child,.rp td:first-child{text-align:left;position:sticky;left:0;background:#fff}.rp th{font-size:11px;color:var(--mut);font-weight:600}.rp tr.tot td{font-weight:700;background:#f7f8fb}
+.barv{display:inline-block;height:8px;border-radius:4px;background:var(--red);vertical-align:middle;margin-left:6px}
 @media(max-width:520px){.f{grid-template-columns:1fr}}
 </style></head><body>
 <?php if (!$in): ?>
@@ -199,6 +244,13 @@ input[type=checkbox]{width:auto}
 <?php else:
   $t = h(csrf());
   $hid = function ($a) use ($t) { return '<input type="hidden" name="a" value="' . $a . '"><input type="hidden" name="t" value="' . $t . '">'; };
+  $dateBar = function () use ($q, $days, $from, $to, $tab, $all, $grp) {
+    $o = '<div class="bar">';
+    foreach (['1' => 'Today', '7' => '7 days', '30' => '30 days', 'all' => 'All'] as $k => $v) $o .= '<a href="' . h($q(['d' => $k])) . '" class="' . ($days === (string)$k ? 'on' : '') . '">' . $v . '</a>';
+    $o .= '</div><form method="get" class="bar dr"><input type="hidden" name="tab" value="' . h($tab) . '">' . ($all ? '<input type="hidden" name="all" value="1">' : '') . ($grp !== 'day' ? '<input type="hidden" name="g" value="' . h($grp) . '">' : '')
+      . '<input type="date" name="from" value="' . h($from) . '" aria-label="From date"><span class="t">to</span><input type="date" name="to" value="' . h($to ?: date('Y-m-d')) . '" aria-label="To date"><button class="' . ($days === 'custom' ? '' : 'l') . '">Show</button></form>';
+    return $o;
+  };
   $moves = jread('moves.json', []);
   $convertedLeads = []; foreach ($moves as $m) if (!empty($m['lead'])) $convertedLeads[$m['lead']] = $m;
 ?>
@@ -207,7 +259,8 @@ input[type=checkbox]{width:auto}
 <?php if ($msg): ?><div class="msg"><?= h($msg) ?></div><?php endif; ?>
 <nav>
   <a href="?tab=leads" class="<?= $tab === 'leads' ? 'on' : '' ?>">Leads</a>
-  <a href="?tab=moves" class="<?= $tab === 'moves' ? 'on' : '' ?>">Recent moves (<?= count($moves) ?>)</a>
+  <a href="?tab=moves" class="<?= $tab === 'moves' ? 'on' : '' ?>">Bookings (<?= count($moves) ?>)</a>
+  <a href="?tab=reports" class="<?= $tab === 'reports' ? 'on' : '' ?>">Reports</a>
   <a href="?tab=offers" class="<?= $tab === 'offers' ? 'on' : '' ?>">Offers</a>
   <a href="?tab=settings" class="<?= $tab === 'settings' ? 'on' : '' ?>">Password</a>
 </nav>
@@ -218,9 +271,7 @@ input[type=checkbox]{width:auto}
     <div class="row"><button type="button" id="al-on">Turn on alerts</button><button type="button" class="l" id="al-test" hidden>Send test alert</button></div>
   </div>
 <?php
-  $rows = [];
-  $fh = @fopen("$DIR/leads.csv", 'r');
-  if ($fh) { while (($line = fgets($fh)) !== false) { $r = str_getcsv($line); if (count($r) < 7) continue; $r['key'] = sha1(rtrim($line, "\r\n")); $rows[] = $r; } fclose($fh); }
+  $rows = read_leads();
   $hidden = jread('hidden-leads.json', []);
   // One time (mark, 2026-11-28): remove his own test leads named "Manu". They stay under "Removed leads" and can be restored.
   if (empty($cfg['hid_manu'])) {
@@ -230,23 +281,19 @@ input[type=checkbox]{width:auto}
   $hiddenRows = array_values(array_filter($rows, function ($r) use ($hidden) { return isset($hidden[$r['key']]); }));
   $rows = array_values(array_filter($rows, function ($r) use ($hidden) { return !isset($hidden[$r['key']]); }));
   $rows = array_reverse($rows);
-  $cut = $days === 'all' ? 0 : strtotime('today') - ((int)$days - 1) * 86400;
   $groups = [];
   foreach ($rows as $r) {
-    $ts = strtotime(str_replace('-', ' ', substr($r[0], 0, 11)) . ' ' . substr($r[0], 12));
-    if ($ts === false || $ts < $cut) continue;
-    $isClick = stripos($r[1], 'click') !== false;
-    if ($isClick && !$all) continue;
-    $groups[date('Y-m-d', $ts)][] = $r + ['ts' => $ts, 'click' => $isClick];
+    $ts = $r['ts'];
+    if ($ts === false || $ts < $range[0] || $ts > $range[1]) continue;
+    if ($r['click'] && !$all) continue;
+    $groups[date('Y-m-d', $ts)][] = $r;
   }
   krsort($groups);
   foreach ($groups as &$gl) usort($gl, function ($a, $b) { return $b['ts'] <=> $a['ts']; });
   unset($gl);
 ?>
-  <div class="bar">
-    <?php foreach (['1' => 'Today', '7' => '7 days', '30' => '30 days', 'all' => 'All'] as $k => $v): ?><a href="<?= h($q(['d' => $k])) ?>" class="<?= $days === (string)$k ? 'on' : '' ?>"><?= $v ?></a><?php endforeach; ?>
-    <a href="<?= h($q(['all' => $all ? null : 1])) ?>" class="<?= $all ? 'on' : '' ?>"><?= $all ? '✓ ' : '' ?>Show WhatsApp / call taps</a>
-  </div>
+  <?= $dateBar() ?>
+  <div class="bar"><a href="<?= h($q(['all' => $all ? null : 1])) ?>" class="<?= $all ? 'on' : '' ?>"><?= $all ? '✓ ' : '' ?>Show WhatsApp / call taps</a></div>
   <?php if (!$groups): ?><div class="empty">No leads in this period.</div><?php endif; ?>
   <?php foreach ($groups as $day => $list): ?>
     <h2><span><?= date('D, j M Y', strtotime($day)) ?></span><span><?= count($list) ?></span></h2>
@@ -272,8 +319,11 @@ input[type=checkbox]{width:auto}
           <label>From<input name="from" value="<?= h($r[5]) ?>" required maxlength="40"></label>
           <label>To<input name="to" value="<?= h($r[6]) ?>" required maxlength="40"></label>
           <label>Car model<input name="car" value="<?= h($r[7]) ?>" maxlength="40" placeholder="e.g. Hyundai Creta"></label>
-          <label>Move date<input type="date" name="date" value="<?= date('Y-m-d') ?>"></label>
-          <label class="full" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="show" value="1" checked> Show on website (only date, route and car; never name or phone)</label>
+          <label>Pickup date<input type="date" name="date" value="<?= h(okdate($r[9]) ?: date('Y-m-d')) ?>"></label>
+          <label>Total price ₹<input type="number" name="price" inputmode="numeric" min="0" placeholder="e.g. 18000"></label>
+          <label>Advance received ₹<input type="number" name="advance" inputmode="numeric" min="0" placeholder="e.g. 3000"></label>
+          <input type="hidden" name="name" value="<?= h($r[3]) ?>"><input type="hidden" name="phone" value="<?= h($r[4]) ?>">
+          <label class="full" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="show" value="1" checked> Show on website (only date, route and car; never name, phone or price)</label>
           <button class="full">Save as converted</button>
         </form></details>
       <?php endif; ?>
@@ -290,25 +340,80 @@ input[type=checkbox]{width:auto}
   </details>
   <?php endif; ?>
 
-<?php elseif ($tab === 'moves'): ?>
-  <details class="card"><summary class="btn">+ Add a move (phone / walk-in booking)</summary>
+<?php elseif ($tab === 'moves'):
+  $today = date('Y-m-d'); $up = array_filter($moves, function ($m) use ($today) { return $m['date'] >= $today; });
+  $sumP = 0; $sumA = 0; foreach ($moves as $m) { $sumP += $m['price'] ?? 0; $sumA += $m['advance'] ?? 0; }
+  usort($moves, function ($a, $b) use ($today) { $fa = $a['date'] >= $today; $fb = $b['date'] >= $today; if ($fa !== $fb) return $fa ? -1 : 1; return $fa ? strcmp($a['date'], $b['date']) : strcmp($b['date'], $a['date']); });
+?>
+  <div class="kpis"><div class="kpi"><b><?= count($up) ?></b><span>Upcoming pickups</span></div><div class="kpi"><b><?= inr($sumP) ?></b><span>Total booked</span></div><div class="kpi"><b><?= inr($sumA) ?></b><span>Advance received</span></div><div class="kpi"><b><?= inr($sumP - $sumA) ?></b><span>Balance to collect</span></div></div>
+  <details class="card"><summary class="btn">+ Add a booking (phone / walk-in)</summary>
     <form method="post" action="<?= h($self . $q([])) ?>" class="f"><?= $hid('addmove') ?>
+      <label>Customer name<input name="name" maxlength="60"></label>
+      <label>Phone<input name="phone" inputmode="tel" maxlength="20"></label>
       <label>From<input name="from" required maxlength="40" placeholder="Kozhikode"></label>
       <label>To<input name="to" required maxlength="40" placeholder="Bangalore"></label>
       <label>Car model<input name="car" maxlength="40" placeholder="Toyota Innova"></label>
-      <label>Move date<input type="date" name="date" value="<?= date('Y-m-d') ?>"></label>
-      <label class="full" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="show" value="1" checked> Show on website</label>
-      <button class="full">Add move</button>
+      <label>Pickup date<input type="date" name="date" value="<?= $today ?>"></label>
+      <label>Total price ₹<input type="number" name="price" inputmode="numeric" min="0"></label>
+      <label>Advance received ₹<input type="number" name="advance" inputmode="numeric" min="0"></label>
+      <label class="full" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" name="show" value="1" checked> Show on website (only date, route and car)</label>
+      <button class="full">Add booking</button>
     </form></details>
-  <p class="t">These show on the website as "Recent car moves" (date, route, car). Use Hide for any you don't want public.</p>
-  <?php if (!$moves): ?><div class="empty">No moves yet. Mark a lead as converted, or add one above.</div><?php endif; ?>
-  <?php foreach ($moves as $m): ?>
-    <div class="card row"><div class="grow"><div class="rt"><?= h($m['from']) ?> → <?= h($m['to']) ?></div>
-      <div class="t"><?= h(date('j M Y', strtotime($m['date']))) ?><?= $m['car'] ? ' · ' . h($m['car']) : '' ?> · <?= $m['show'] ? '<span class="tag ok">On website</span>' : '<span class="tag">Hidden</span>' ?></div></div>
-      <form method="post" action="<?= h($self . $q([])) ?>"><?= $hid('move_toggle') ?><input type="hidden" name="id" value="<?= h($m['id']) ?>"><button class="l"><?= $m['show'] ? 'Hide' : 'Show' ?></button></form>
-      <form method="post" action="<?= h($self . $q([])) ?>" onsubmit="return confirm('Delete this move?')"><?= $hid('move_del') ?><input type="hidden" name="id" value="<?= h($m['id']) ?>"><button class="r">Delete</button></form>
+  <p class="t">Upcoming pickups first. 🔔 You get a phone reminder the evening before and on the morning of each pickup. Price, advance, name and phone are private; the website shows only date, route and car.</p>
+  <?php if (!$moves): ?><div class="empty">No bookings yet. Mark a lead as converted, or add one above.</div><?php endif; ?>
+  <?php foreach ($moves as $m): $p = (int)($m['price'] ?? 0); $ad = (int)($m['advance'] ?? 0); $soon = $m['date'] >= $today; ?>
+    <div class="card"<?= $soon ? ' style="border-left:4px solid var(--red)"' : '' ?>>
+      <div class="row"><div class="grow"><div class="rt"><?= h($m['from']) ?> → <?= h($m['to']) ?></div>
+        <div class="t"><?= $soon ? '<b style="color:var(--red)">Pickup ' . h(date('D, j M', strtotime($m['date']))) . '</b>' : h(date('j M Y', strtotime($m['date']))) ?><?= $m['car'] ? ' · ' . h($m['car']) : '' ?> · <?= $m['show'] ? '<span class="tag ok">On website</span>' : '<span class="tag">Hidden</span>' ?></div>
+        <?php if (!empty($m['name']) || !empty($m['phone'])): ?><div class="t"><?= h($m['name'] ?? '') ?> <?php if (!empty($m['phone'])): ?><a href="tel:<?= h(preg_replace('/[^0-9+]/', '', $m['phone'])) ?>"><?= h($m['phone']) ?></a><?php endif; ?></div><?php endif; ?>
+        <div class="t" style="margin-top:3px"><?= $p ? 'Price <b>' . inr($p) . '</b> · Advance <b>' . inr($ad) . '</b> · Balance <b style="color:' . ($p - $ad > 0 ? 'var(--red)' : 'var(--ok)') . '">' . inr($p - $ad) . '</b>' : 'No price added' ?><?= !empty($m['note']) ? ' · ' . h($m['note']) : '' ?></div>
+      </div></div>
+      <div class="row" style="margin-top:8px">
+        <details class="grow"><summary class="btn l" style="font-size:13px;padding:6px 10px">Edit payment / date</summary>
+          <form method="post" action="<?= h($self . $q([])) ?>" class="f"><?= $hid('move_pay') ?><input type="hidden" name="id" value="<?= h($m['id']) ?>">
+            <label>Total price ₹<input type="number" name="price" min="0" value="<?= $p ?: '' ?>"></label>
+            <label>Advance received ₹<input type="number" name="advance" min="0" value="<?= $ad ?: '' ?>"></label>
+            <label>Pickup date<input type="date" name="date" value="<?= h($m['date']) ?>"></label>
+            <label>Note<input name="note" maxlength="120" value="<?= h($m['note'] ?? '') ?>" placeholder="e.g. advance by GPay"></label>
+            <button class="full">Save</button></form></details>
+        <form method="post" action="<?= h($self . $q([])) ?>"><?= $hid('move_toggle') ?><input type="hidden" name="id" value="<?= h($m['id']) ?>"><button class="l" style="font-size:13px;padding:6px 10px"><?= $m['show'] ? 'Hide' : 'Show' ?></button></form>
+        <form method="post" action="<?= h($self . $q([])) ?>" onsubmit="return confirm('Delete this booking?')"><?= $hid('move_del') ?><input type="hidden" name="id" value="<?= h($m['id']) ?>"><button class="r" style="font-size:13px;padding:6px 10px">Delete</button></form>
+      </div>
     </div>
   <?php endforeach; ?>
+
+<?php elseif ($tab === 'reports'):
+  $hidden = jread('hidden-leads.json', []);
+  $leads = array_filter(read_leads(), function ($r) use ($hidden, $range) { return !isset($hidden[$r['key']]) && $r['ts'] && $r['ts'] >= $range[0] && $r['ts'] <= $range[1]; });
+  $ads = jread('ads-daily.json', []); $adsUpd = $ads['_updated'] ?? ''; unset($ads['_updated']);
+  $bk = function ($ts) use ($grp) { return $grp === 'month' ? date('Y-m', $ts) : ($grp === 'week' ? date('o-\\WW', $ts) : date('Y-m-d', $ts)); };
+  $lab = function ($k) use ($grp) { if ($grp === 'month') return date('M Y', strtotime($k . '-01')); if ($grp === 'week') { [$y, $w] = explode('-W', $k); return 'Week of ' . date('j M', strtotime($y . 'W' . $w)); } return date('D j M', strtotime($k)); };
+  $B = []; $z = ['forms' => 0, 'adsForms' => 0, 'taps' => 0, 'book' => 0, 'value' => 0, 'adv' => 0, 'spend' => 0, 'clicks' => 0, 'impr' => 0];
+  foreach ($leads as $r) { $k = $bk($r['ts']); $B[$k] = $B[$k] ?? $z; if ($r['click']) $B[$k]['taps']++; else { $B[$k]['forms']++; if ($r['ads']) $B[$k]['adsForms']++; } }
+  foreach ($moves as $m) { $ts = strtotime(substr($m['added'] ?? $m['date'], 0, 10)); if ($ts < $range[0] || $ts > $range[1]) continue; $k = $bk($ts); $B[$k] = $B[$k] ?? $z; $B[$k]['book']++; $B[$k]['value'] += $m['price'] ?? 0; $B[$k]['adv'] += $m['advance'] ?? 0; }
+  foreach ($ads as $d => $a) { $ts = strtotime($d); if ($ts < $range[0] || $ts > $range[1]) continue; $k = $bk($ts); $B[$k] = $B[$k] ?? $z; $B[$k]['spend'] += $a['cost']; $B[$k]['clicks'] += $a['clicks']; $B[$k]['impr'] += $a['impr']; }
+  krsort($B); $T = $z; foreach ($B as $b) foreach ($b as $k => $v) $T[$k] += $v;
+  $maxF = 1; foreach ($B as $b) $maxF = max($maxF, $b['forms']);
+  $cpl = $T['forms'] ? $T['spend'] / $T['forms'] : 0;
+?>
+  <?= $dateBar() ?>
+  <div class="bar"><?php foreach (['day' => 'Daily', 'week' => 'Weekly', 'month' => 'Monthly'] as $k => $v): ?><a href="<?= h($q(['g' => $k === 'day' ? null : $k])) ?>" class="<?= $grp === $k ? 'on' : '' ?>"><?= $v ?></a><?php endforeach; ?></div>
+  <div class="kpis">
+    <div class="kpi"><b><?= $T['forms'] ?></b><span>Form leads</span></div>
+    <div class="kpi"><b><?= $T['taps'] ?></b><span>Call / WhatsApp taps</span></div>
+    <div class="kpi"><b><?= $T['book'] ?></b><span>Bookings<?= $T['forms'] ? ' · ' . round($T['book'] * 100 / $T['forms']) . '%' : '' ?></span></div>
+    <div class="kpi"><b><?= inr($T['value']) ?></b><span>Booked value</span></div>
+    <div class="kpi"><b><?= inr($T['adv']) ?></b><span>Advance received</span></div>
+    <div class="kpi"><b><?= $ads ? inr($T['spend']) : '–' ?></b><span>Google Ads spend</span></div>
+    <div class="kpi"><b><?= $ads && $T['forms'] ? inr($cpl) : '–' ?></b><span>Cost per lead</span></div>
+    <div class="kpi"><b><?= $ads && $T['book'] ? inr($T['spend'] / $T['book']) : '–' ?></b><span>Ad cost per booking</span></div>
+  </div>
+  <?php if (!$ads): ?><div class="card t">Google Ads spend will show here once the Google Ads link is set up (one-time step).</div><?php else: ?><p class="t">Google Ads data updated <?= h(date('j M, g:i A', strtotime($adsUpd))) ?>.</p><?php endif; ?>
+  <div class="tw"><table class="rp"><tr><th><?= $grp === 'day' ? 'Day' : ($grp === 'week' ? 'Week' : 'Month') ?></th><th>Leads</th><th>From ads</th><th>Taps</th><th>Bookings</th><th>Value</th><th>Advance</th><th>Ad spend</th><th>Clicks</th><th>Cost/lead</th></tr>
+    <?php foreach ($B as $k => $b): ?><tr><td><?= h($lab($k)) ?></td><td><?= $b['forms'] ?><span class="barv" style="width:<?= round(40 * $b['forms'] / $maxF) ?>px"></span></td><td><?= $b['adsForms'] ?></td><td><?= $b['taps'] ?></td><td><?= $b['book'] ?></td><td><?= $b['value'] ? inr($b['value']) : '' ?></td><td><?= $b['adv'] ? inr($b['adv']) : '' ?></td><td><?= $b['spend'] ? inr($b['spend']) : '' ?></td><td><?= $b['clicks'] ?: '' ?></td><td><?= $b['spend'] && $b['forms'] ? inr($b['spend'] / $b['forms']) : '' ?></td></tr><?php endforeach; ?>
+    <tr class="tot"><td>Total</td><td><?= $T['forms'] ?></td><td><?= $T['adsForms'] ?></td><td><?= $T['taps'] ?></td><td><?= $T['book'] ?></td><td><?= inr($T['value']) ?></td><td><?= inr($T['adv']) ?></td><td><?= $T['spend'] ? inr($T['spend']) : '' ?></td><td><?= $T['clicks'] ?: '' ?></td><td><?= $T['spend'] && $T['forms'] ? inr($cpl) : '' ?></td></tr>
+  </table></div>
+  <?php if (!$B): ?><div class="empty">No data in this period.</div><?php endif; ?>
 
 <?php elseif ($tab === 'offers'): $offers = jread('offers.json', []); $today = date('Y-m-d'); ?>
   <div class="card"><b>New offer</b>

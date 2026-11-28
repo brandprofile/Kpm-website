@@ -9,7 +9,8 @@ self.addEventListener('push', (e) => {
       const r = await fetch('/kpm-admin.php?latest=1', { credentials: 'include', cache: 'no-store' });
       if (r.ok) {
         const j = await r.json();
-        if (j.test) { title = 'KPM alerts are working ✅'; body = 'You will get an alert like this for every new lead.'; }
+        if (j.notice) { title = j.notice.title; body = j.notice.body; }
+        else if (j.test) { title = 'KPM alerts are working ✅'; body = 'You will get an alert like this for every new lead.'; }
         else if (j.lead) {
           const l = j.lead;
           title = 'New lead: ' + (l.name || 'No name') + (l.phone ? ' · ' + l.phone : '');
