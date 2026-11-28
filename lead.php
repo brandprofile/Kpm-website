@@ -12,7 +12,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
   $k = isset($_GET['k']) ? (string)$_GET['k'] : '';
   if (!hash_equals(KEY_HASH, hash('sha256', $k))) { http_response_code(404); exit; }
   header('Content-Type: text/csv; charset=utf-8');
-  if (is_file($file)) readfile($file);
+  // Leads the owner removed in /kpm-admin.php (test / spam) are left out of the Google Sheet too.
+  $hidden = is_file($dir . '/hidden-leads.json') ? (json_decode((string)file_get_contents($dir . '/hidden-leads.json'), true) ?: []) : [];
+  if (is_file($file)) { $fh = fopen($file, 'r'); while (($line = fgets($fh)) !== false) if (!isset($hidden[sha1(rtrim($line, "\r\n"))])) echo $line; fclose($fh); }
   exit;
 }
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') { http_response_code(405); exit; }

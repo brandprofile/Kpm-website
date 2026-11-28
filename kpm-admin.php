@@ -43,8 +43,10 @@ function logged_in() {
   if (!preg_match('/^(\d{10})\.([a-f0-9]{64})$/', $c, $m)) return false;
   return (int)$m[1] > time() && hash_equals(sign($m[1]), $m[2]);
 }
+// Lax, not Strict: Strict cookies are not sent when the page is opened from the home-screen app, a notification
+// or a WhatsApp link, which made it ask for the password every time. POSTs stay protected by the CSRF token + Origin check.
 function set_cookie($val, $exp) {
-  setcookie(COOKIE, $val, ['expires' => $exp, 'path' => '/kpm-admin.php', 'secure' => true, 'httponly' => true, 'samesite' => 'Strict']);
+  setcookie(COOKIE, $val, ['expires' => $exp, 'path' => '/kpm-admin.php', 'secure' => true, 'httponly' => true, 'samesite' => 'Lax']);
 }
 function csrf() { global $SECRET; return hash_hmac('sha256', 'csrf|' . ($_COOKIE[COOKIE] ?? ''), $SECRET); }
 function ip() { return $_SERVER['REMOTE_ADDR'] ?? '0'; }
@@ -114,6 +116,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
       if ($m['from'] !== '' && $m['to'] !== '') { array_unshift($moves, $m); jwrite('moves.json', $moves); }
       header("Location: $back"); exit;
     }
+    if ($a === 'lead_hide' || $a === 'lead_unhide') {
+      $k = preg_replace('/[^a-f0-9]/', '', (string)($_POST['lead'] ?? ''));
+      $hid = jread('hidden-leads.json', []);
+      if ($a === 'lead_hide' && strlen($k) === 40) $hid[$k] = date('c'); else unset($hid[$k]);
+      jwrite('hidden-leads.json', $hid); header("Location: $back"); exit;
+    }
     if ($a === 'move_toggle' || $a === 'move_del') {
       $id = (string)($_POST['id'] ?? ''); $moves = jread('moves.json', []);
       foreach ($moves as $i => $m) if ($m['id'] === $id) { if ($a === 'move_del') unset($moves[$i]); else $moves[$i]['show'] = !$m['show']; }
@@ -143,6 +151,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 // ---------- page ----------
 $in = logged_in();
+// Keep the owner logged in: every visit renews the 30 days (and upgrades old cookies to Lax).
+if ($in && $_SERVER['REQUEST_METHOD'] === 'GET') { $exp = time() + SESSION_DAYS * 86400; set_cookie($exp . '.' . sign($exp), $exp); $_COOKIE[COOKIE] = $exp . '.' . sign($exp); }
 $tab = in_array($_GET['tab'] ?? '', ['leads', 'moves', 'offers', 'settings'], true) ? $_GET['tab'] : 'leads';
 $days = in_array($_GET['d'] ?? '', ['1', '7', '30', 'all'], true) ? $_GET['d'] : '7';
 $all = !empty($_GET['all']);
@@ -211,6 +221,14 @@ input[type=checkbox]{width:auto}
   $rows = [];
   $fh = @fopen("$DIR/leads.csv", 'r');
   if ($fh) { while (($line = fgets($fh)) !== false) { $r = str_getcsv($line); if (count($r) < 7) continue; $r['key'] = sha1(rtrim($line, "\r\n")); $rows[] = $r; } fclose($fh); }
+  $hidden = jread('hidden-leads.json', []);
+  // One time (mark, 2026-11-28): remove his own test leads named "Manu". They stay under "Removed leads" and can be restored.
+  if (empty($cfg['hid_manu'])) {
+    foreach ($rows as $r) if (preg_match('/\bmanu\b/i', $r[3])) $hidden[$r['key']] = date('c');
+    jwrite('hidden-leads.json', $hidden); $cfg['hid_manu'] = 1; jwrite('admin.json', $cfg);
+  }
+  $hiddenRows = array_values(array_filter($rows, function ($r) use ($hidden) { return isset($hidden[$r['key']]); }));
+  $rows = array_values(array_filter($rows, function ($r) use ($hidden) { return !isset($hidden[$r['key']]); }));
   $rows = array_reverse($rows);
   $cut = $days === 'all' ? 0 : strtotime('today') - ((int)$days - 1) * 86400;
   $groups = [];
@@ -247,6 +265,7 @@ input[type=checkbox]{width:auto}
         </div>
         <?php if ($phone): ?><a class="btn l" href="tel:<?= h($phone) ?>">Call</a><a class="btn g" href="https://wa.me/<?= h($wa) ?>" target="_blank" rel="noopener">WhatsApp</a><?php endif; ?>
       </div>
+      <form method="post" action="<?= h($self . $q([])) ?>" onsubmit="return confirm('Remove this lead from the list? (test / spam)')" style="float:right;margin-top:8px"><?= $hid('lead_hide') ?><input type="hidden" name="lead" value="<?= h($r['key']) ?>"><button class="l" style="font-size:13px;padding:6px 10px">Remove</button></form>
       <?php if (!$conv && !$r['click']): ?>
       <details><summary class="btn l" style="margin-top:8px">Mark converted</summary>
         <form method="post" action="<?= h($self . $q([])) ?>" class="f"><?= $hid('convert') ?><input type="hidden" name="lead" value="<?= h($r['key']) ?>">
@@ -261,6 +280,15 @@ input[type=checkbox]{width:auto}
     </div>
     <?php endforeach; ?>
   <?php endforeach; ?>
+
+  <?php if ($hiddenRows): ?>
+  <details style="margin-top:18px"><summary class="t">Removed leads (<?= count($hiddenRows) ?>) · tap to see / restore</summary>
+    <?php foreach (array_reverse($hiddenRows) as $r): ?>
+      <div class="card row" style="opacity:.7"><div class="grow"><span class="t"><?= h($r[0]) ?></span> <b><?= h($r[3] ?: 'No name') ?></b> <span class="t"><?= h($r[4]) ?> <?= h(trim($r[5] . ' → ' . $r[6], ' →')) ?></span></div>
+        <form method="post" action="<?= h($self . $q([])) ?>"><?= $hid('lead_unhide') ?><input type="hidden" name="lead" value="<?= h($r['key']) ?>"><button class="l">Restore</button></form></div>
+    <?php endforeach; ?>
+  </details>
+  <?php endif; ?>
 
 <?php elseif ($tab === 'moves'): ?>
   <details class="card"><summary class="btn">+ Add a move (phone / walk-in booking)</summary>
